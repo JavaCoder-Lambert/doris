@@ -108,6 +108,8 @@ SHOW SQL_BLOCK_RULE;
 
 补充最新通用执行链候选：[#67755 / 9125fd692271](https://github.com/apache/doris/commit/9125fd692271ef6292a73000f4f95d53ecb24ee3)在调用业务回调前清空 RPC request attachment，并为每次 Exchange RPC 创建独立 callback/Controller/response，避免重入时复用仍在调用栈上的状态；没有修改 NULL-safe key 算法。精确 3.0.8 仍有 [Channel 复用 callback 并 Reset Controller](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/be/src/vec/sink/vdata_stream_sender.h#L179-L187)、[成功回调再次发送 RPC](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/be/src/pipeline/exec/exchange_sink_buffer.cpp#L255-L277)，及 [closure 在回调后读取 Controller/response，未提前清空 attachment](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/be/src/util/ref_count_closure.h#L94-L105)的模式。它可作为“master 已处理、3.0.8 有相关代码模式”的独立候选；没有生产堆栈或竞态复现，不能认定历史六键崩溃同源，单 BE 语义测试通过也不能排除此竞态。
 
+后续 4.1.4 验证补充：相同 ASAN ELF 在真正 x86_64 Linux 内核上已完整执行定向测试，四个新增 RPC 用例分别复现 response 污染、Controller 污染、回调前 attachment 未清理及 callback 销毁后 attachment 未清理。它们是确定性的回调重入/资源契约测试，不是网络并发或用户事故复现。修复后的运行状态、精确 ELF/XML 摘要见 [4.1.4 交付记录](4.1.4-null-safe-fix.md)。
+
 ## 下一步如何快速区分
 
 1. 保留现场 FE 与每台 BE 的完整版本和 git commit；当前已知用户报告的 `3.0.8-rc01-09b0cc49a6`，仍需按节点核对是否混部。不要把 MySQL 协议兼容版本 `5.7.99` 当作 Doris 版本。
