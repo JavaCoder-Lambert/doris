@@ -86,6 +86,8 @@ EXPLAIN 中原结构在 RF 开启时有 RF 描述；窗口方案是扫描、Exch
 
 工具静态检查已通过 Python AST、`py_compile`、`--help`，确认 20 个唯一场景与六键预期列结构；交付文档的相对链接均可解析，`git diff --check` 与暂存差异检查通过。独立审阅重算了 CTE 预期与两版结果统计，并检查了建库碰撞、异常退出和真实失败保留。未新增或修改引擎实现。
 
-实际尝试仓库预设命令 `./run-regression-test.sh --run -d query_p0/join -s test_null_safe_eq_join_string_key`，在 JDK 17 前置检查阶段非零退出：当前本机可发现的 JDK 为 8，框架没有现成 jar。**此官方 suite 未运行，FE/BE 未编译，ASAN 与 FE/BE 单测未执行。** 对已发布二进制的 SQL 探针不能替代这些检查。
+初次尝试仓库预设命令在 JDK 17 前置检查阶段非零退出。当时只检查了系统 `java_home`，结论不完整：本机实际已安装由 jenv 管理的 Microsoft OpenJDK 17.0.19，路径为 `~/.jenv/versions/17`。后续通过命令级 `JAVA_HOME` / `JDK_17` 已解决，无需修改全局 Java 8。
+
+后续使用与 4.1.4 匹配的框架、Thrift 0.16.0，成功执行 `./run-regression-test.sh --compile`（含 Java UDF），再执行 `./run-regression-test.sh --run -d query_p0/join -s test_null_safe_eq_join_string_key -parallel 1`。原版 4.1.4 的官方 suite 退出码为 1：`minimal_left_join` 预期 `[2,1]`、实际 `[2,NULL]`，与独立探针一致。该结果是原版错误的红测，不是修复后通过。日志保留于 `../doris-investigation-20260911/results/regression414-official-baseline.log`；4.1.4 补丁构建在独立目录 `../doris-4.1.4-nullsafe` 继续。
 
 目前已知精确生产版本；仍未提供完整 `q_raw`、表类型、事故计划与 BE 崩溃堆栈。单 BE、小样本没有覆盖分布式 RF 合并、生命周期竞态、跨 block 大数据与生产资源压力，因此没有证明历史崩溃已修复，也没有评估升级兼容性。
