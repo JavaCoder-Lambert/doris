@@ -234,4 +234,121 @@ TEST_F(ExchangeSinkTest, test_queue_size) {
     }
 }
 
+TEST_F(ExchangeSinkTest, ReentrantRpcPreservesCompletedResponse) {
+    using Callback = ExchangeSendCallback<PTransmitDataResult>;
+    using BaseClosure = AutoReleaseClosure<PTransmitDataParams, Callback>;
+    class ObservedClosure : public BaseClosure {
+    public:
+        using BaseClosure::BaseClosure;
+        int* reported_errors = nullptr;
+
+    protected:
+        void _process_if_rpc_failed() override { ++*reported_errors; }
+        void _process_if_meet_error_status(const Status&) override { ++*reported_errors; }
+    };
+
+    auto state = std::make_shared<MockRuntimeState>();
+    auto buffer = create_buffer(state);
+    auto sink = create_sink(state, buffer);
+    auto channel = sink.channels[dest_ins_id_1];
+    auto* instance = buffer->_rpc_instances[dest_ins_id_1].get();
+    auto callback = channel->get_send_callback(instance, false);
+    callback->start_rpc_time = 0;
+    int callbacks = 0;
+    int reported_errors = 0;
+
+    callback->addSuccessHandler([&](RpcInstance* ins, const bool&,
+                                    const PTransmitDataResult& response, const int64_t&) {
+        ++callbacks;
+        // Model the next RPC completing while the previous success callback is on the stack.
+        auto next_callback = channel->get_send_callback(ins, true);
+        Status::InternalError("second RPC response")
+                .to_protobuf(next_callback->response_->mutable_status());
+        EXPECT_TRUE(Status::create(response.status()).ok());
+    });
+    callback->addFailedHandler([&](RpcInstance*, const std::string&) { ++reported_errors; });
+
+    auto closure = std::unique_ptr<ObservedClosure>(
+            ::new ObservedClosure(std::make_shared<PTransmitDataParams>(), callback));
+    closure->reported_errors = &reported_errors;
+    closure.release()->Run();
+    EXPECT_EQ(callbacks, 1);
+    // Run() must inspect the completed RPC, not report the next RPC's failure.
+    EXPECT_EQ(reported_errors, 0);
+}
+
+TEST_F(ExchangeSinkTest, ReentrantRpcPreservesCompletedController) {
+    using Callback = ExchangeSendCallback<PTransmitDataResult>;
+    using BaseClosure = AutoReleaseClosure<PTransmitDataParams, Callback>;
+    class ObservedClosure : public BaseClosure {
+    public:
+        using BaseClosure::BaseClosure;
+        int* reported_errors = nullptr;
+
+    protected:
+        void _process_if_rpc_failed() override { ++*reported_errors; }
+        void _process_if_meet_error_status(const Status&) override { ++*reported_errors; }
+    };
+
+    auto state = std::make_shared<MockRuntimeState>();
+    auto buffer = create_buffer(state);
+    auto sink = create_sink(state, buffer);
+    auto channel = sink.channels[dest_ins_id_1];
+    auto* instance = buffer->_rpc_instances[dest_ins_id_1].get();
+    auto callback = channel->get_send_callback(instance, false);
+    callback->start_rpc_time = 0;
+    int callbacks = 0;
+    int reported_errors = 0;
+
+    callback->addSuccessHandler(
+            [&](RpcInstance* ins, const bool&, const PTransmitDataResult&, const int64_t&) {
+                ++callbacks;
+                auto next_callback = channel->get_send_callback(ins, true);
+                next_callback->cntl_->SetFailed("second RPC transport failure");
+            });
+    callback->addFailedHandler([&](RpcInstance*, const std::string&) { ++reported_errors; });
+
+    auto closure = std::unique_ptr<ObservedClosure>(
+            ::new ObservedClosure(std::make_shared<PTransmitDataParams>(), callback));
+    closure->reported_errors = &reported_errors;
+    closure.release()->Run();
+    EXPECT_EQ(callbacks, 1);
+    // The next RPC's transport failure must not change the completed RPC's status.
+    EXPECT_EQ(reported_errors, 0);
+}
+
+TEST_F(ExchangeSinkTest, CompletedRpcReleasesAttachmentBeforeCallback) {
+    class AttachmentCallback : public DummyBrpcCallback<PTransmitDataResult> {
+    public:
+        int calls = 0;
+        void call() override {
+            ++calls;
+            EXPECT_TRUE(cntl_->request_attachment().empty());
+            cntl_->request_attachment().append("new attachment from callback");
+        }
+    };
+    using Closure = AutoReleaseClosure<PTransmitDataParams, AttachmentCallback>;
+    auto callback = std::make_shared<AttachmentCallback>();
+    auto closure = Closure::create_unique(std::make_shared<PTransmitDataParams>(), callback);
+    callback->cntl_->request_attachment().append("serialized runtime filter");
+
+    closure.release()->Run();
+    EXPECT_EQ(callback->calls, 1);
+    EXPECT_EQ(callback->cntl_->request_attachment().to_string(), "new attachment from callback");
+}
+
+TEST_F(ExchangeSinkTest, ExpiredCallbackStillReleasesAttachment) {
+    using Callback = DummyBrpcCallback<PTransmitDataResult>;
+    using Closure = AutoReleaseClosure<PTransmitDataParams, Callback>;
+    auto callback = Callback::create_shared();
+    auto request = std::make_shared<PTransmitDataParams>();
+    auto closure = Closure::create_unique(request, callback);
+    auto controller = callback->cntl_;
+    controller->request_attachment().append("serialized runtime filter");
+    callback.reset();
+
+    closure.release()->Run();
+    EXPECT_TRUE(controller->request_attachment().empty());
+}
+
 } // namespace doris

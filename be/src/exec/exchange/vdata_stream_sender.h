@@ -164,11 +164,9 @@ public:
 
     std::shared_ptr<ExchangeSendCallback<PTransmitDataResult>> get_send_callback(RpcInstance* ins,
                                                                                  bool eos) {
-        if (!_send_callback) {
-            _send_callback = ExchangeSendCallback<PTransmitDataResult>::create_shared();
-        } else {
-            _send_callback->cntl_->Reset();
-        }
+        // A callback can start the next RPC before the current closure finishes.
+        // Keep each RPC's controller and response separate during reentry.
+        _send_callback = ExchangeSendCallback<PTransmitDataResult>::create_shared();
         _send_callback->init(ins, eos);
         return _send_callback;
     }
