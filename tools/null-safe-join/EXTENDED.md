@@ -60,6 +60,14 @@ BE `BackendId=1789091977362` 前后不变，均 `Alive=true`，报告的 `LastSt
 
 本地证据文件为调查目录 `results/nullsafe_ext_414_baseline_20260911.json` 和同名 `.sql`，测试库 `nullsafe_ext_414_baseline_20260911` 保留供复核。**这是原版红测，修复后 Linux x86_64 包的 60 查询绿测仍须单独执行**；复测不得修改 oracle 或删减失败场景。
 
+## 用户精确 3.0.8 版本对照（2026-09-11）
+
+在同一隔离环境加载原版 3.0.8 ARM64 包，BE 实际报告 `doris-3.0.8-rc01-09b0cc49a6`。使用同一脚本、固定种子、60 个查询组合和 Python oracle，**60/60 通过**；`semantics_passed=true`、`plan_coverage_passed=true`、`health.passed=true`，`errors=[]`。所有设置均被接受，必需的 Hash Join 分布与 RF 计划检查通过，没有跳过不支持的变量或放宽计划验收。两个版本的 fixture、查询矩阵和每项预期结果摘要完全一致，3.0.8 的全部实际结果摘要匹配预期。
+
+BE `BackendId=1789092149405` 前后均 Alive，Version 不变，报告的 `LastStartTime` 均为 `2026-09-11 03:35:29`，ErrMsg 为空。查询前后 FE/BE 容器的启动时间和重启计数不变，`OOMKilled=false`。取证完成后仅停止本任务 FE/BE；三个既有服务的容器 ID、启动时间、重启计数和健康状态均未变，也未操作独立构建 context。主动 `stop -t 20` 后 BE 退出码为 137、`OOMKilled=false`；此退出发生在查询完成及健康快照保存之后，不属于查询期间的重启。
+
+证据为调查目录 `results/nullsafe_ext_308_baseline_20260911.json`、同名 `.sql` / `-console.log`，以及 `-containers-before.json`、`-containers-ready.json`、`-containers-after-query.json`、`-containers-stopped.json`。测试库 `nullsafe_ext_308_baseline_20260911` 保留。这证明用户版本在本组边界样本中未出现 4.1.4 的漏匹配，不证明最初生产事故已定位，也不替代修复后 Linux x86_64 包的验证。
+
 ## 4.1.4 源码依据
 
 - `fe/fe-core/src/main/java/org/apache/doris/qe/SessionVariable.java` 的 `checkBatchSize` 接受 1–65535；`batch_size`、`parallel_pipeline_task_num`、`disable_join_reorder` 和 RF 变量均已有定义。
