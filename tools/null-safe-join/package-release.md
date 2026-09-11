@@ -31,11 +31,15 @@ bash tools/null-safe-join/package_release.sh \
 
 destination 的父目录应已存在，且目标目录必须位于源码和 output 之外。已有目标一律拒绝，不覆盖旧包。可用 `--name doris-fork-4.1.4-nullsafe-linux-x86_64` 自定归档根目录名，默认包含源码短 SHA、架构及构建模式。
 
+`package-manifest` 是保留名称，不能用于 `--name`。归档在目标父目录下的临时目录中准备完成，再以 `mkdir` 独占创建目标目录，并通过同一文件系统的硬链接发布完整文件。因此目标文件系统必须支持硬链接；发布整个目录不是单次原子操作，必须等脚本退出码为 0、输出 `Packaged:` 且摘要校验通过后才能交付，不能仅凭目标目录已出现判断成功。普通发布异常会清理本次创建且身份未变的文件与空目录，保留其他进程添加的内容。
+
 脚本参照仓库 `build.sh` 的 `copy_common_files` 和 FE/BE 输出逻辑，复制发行目录，包括每个组件的 `LICENSE-dist.txt`、`NOTICE.txt`、`licenses/`、JAR/库、启动脚本和配置。官方包还可包含 MS、Broker 等组件，本脚本**只交付 FE/BE**，不能用于声称已组装完整 Cloud 发行包。
 
 空的 log、doris-meta、storage、temp_dir 等运行目录不打包；这些目录有文件、出现未知组件入口或发行目录内混入日志/PID 时拒绝。相对软链保留，但必须在组件内部可解析；拒绝外部/绝对软链和特殊文件。配置按输入 output 原样保留，因此必须使用未运行过的构建输出，不能把已部署集群目录当输入。
 
 必检项包括非空 FE/BE 启停脚本、配置、许可文件，实际 `be/lib/doris_be` 的可执行权限及 ELF64 little-endian `EM_X86_64=62`，以及 `fe/lib/doris-fe.jar` 的 ZIP CRC 和 `DorisFE.class`。这只是组包前置检查，不检测所有依赖是否完整，不证明 CPU 支持 AVX2、目标 glibc/动态库兼容或服务能启动。
+
+上述二进制检查在读取输入及复制后各执行一次，清单中的 ELF 信息取自实际待归档副本。构建记录只读取一次，同一份字节用于 JSON 解析和 SHA-256；记录文件随后变化不会导致内容与摘要来自不同版本。这些检查仍不允许一边编译或启动 output、一边组包。
 
 成功后交付目录包含：
 
@@ -52,4 +56,6 @@ sha256sum -c doris-fork-....tar.gz.sha256
 sha256sum -c package-manifest/SHA256SUMS
 ```
 
-本脚本初次交付只做 `bash -n`、嵌入 Python 语法检查和“不完整 output 必须拒绝”检查；真实包正向测试等待完整构建产物。组包成功后仍需记录实际 FE/BE 版本、Linux x86_64 启动、BE 单测、官方 suite、业务探针及升级演练结果，参见 [升级评估](../../docs/development/4.1.4-upgrade-notes.md)。
+本脚本已通过 `bash -n`、嵌入 Python 语法检查及 26 项 synthetic fixture 检查：2 项成功组包、24 项预期拒绝，包括复制后 ELF/JAR 改变、记录内容与摘要一致、软链、保留名、发布异常及并发目标碰撞。成功的模拟包还独立核验了归档摘要、内部文件摘要、权限、软链及内外清单一致性。模拟数据只证明组包工具的行为，不能作为 Doris 编译或运行成功证据；真实包正向测试仍等待完整构建产物。证据保留于本地仓库旁 `../doris-build-state/synthetic-package-audit-fixed/`。
+
+组包成功后仍需记录实际 FE/BE 版本、Linux x86_64 启动、BE 单测、官方 suite、业务探针及升级演练结果，参见 [升级评估](../../docs/development/4.1.4-upgrade-notes.md)。

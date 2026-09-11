@@ -68,6 +68,22 @@ def inspect_elf(path):
             "e_machine": machine, "e_type": kind}
 
 
+def inspect_binaries(root, required_files):
+    for relative in required_files:
+        path = root / relative
+        if not path.is_file() or path.is_symlink() or path.stat().st_size == 0:
+            fail(f"missing, empty or symlinked required output file: {relative}")
+    if not os.access(root / "be/lib/doris_be", os.X_OK):
+        fail("be/lib/doris_be is not executable")
+    elf = inspect_elf(root / "be/lib/doris_be")
+    with zipfile.ZipFile(root / "fe/lib/doris-fe.jar") as jar:
+        if "org/apache/doris/DorisFE.class" not in jar.namelist():
+            fail("doris-fe.jar does not contain org/apache/doris/DorisFE.class")
+        if jar.testzip() is not None:
+            fail("doris-fe.jar failed ZIP CRC validation")
+    return elf
+
+
 def write_json(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -97,21 +113,11 @@ def main():
         "fe/bin/start_fe.sh", "fe/bin/stop_fe.sh", "be/conf/be.conf", "fe/conf/fe.conf",
         "be/LICENSE-dist.txt", "fe/LICENSE-dist.txt", "be/NOTICE.txt", "fe/NOTICE.txt",
     )
-    for relative in required_files:
-        path = output / relative
-        if not path.is_file() or path.is_symlink() or path.stat().st_size == 0:
-            fail(f"missing, empty or symlinked required output file: {relative}")
-    if not os.access(output / "be/lib/doris_be", os.X_OK):
-        fail("be/lib/doris_be is not executable")
-    elf = inspect_elf(output / "be/lib/doris_be")
-    with zipfile.ZipFile(output / "fe/lib/doris-fe.jar") as jar:
-        if "org/apache/doris/DorisFE.class" not in jar.namelist():
-            fail("doris-fe.jar does not contain org/apache/doris/DorisFE.class")
-        if jar.testzip() is not None:
-            fail("doris-fe.jar failed ZIP CRC validation")
+    inspect_binaries(output, required_files)
 
     record_path = args.build_record.resolve(strict=True)
-    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record_bytes = record_path.read_bytes()
+    record = json.loads(record_bytes.decode("utf-8"))
     if not isinstance(record, dict) or type(record.get("build_exit_code")) is not int or record["build_exit_code"] != 0:
         fail("build record must report actual build_exit_code 0")
     for key in ("source_commit", "build_type", "build_command", "completed_at_utc"):
@@ -133,6 +139,8 @@ def main():
     name = args.name or f"doris-fork-{head[:12]}-linux-x86_64-{record['build_type'].lower()}"
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
         fail("invalid package name")
+    if name.casefold() == "package-manifest":
+        fail("package-manifest is reserved for delivery metadata")
 
     # These are the component-level release directories populated by build.sh.
     release_dirs = {
@@ -185,9 +193,14 @@ def main():
                 target.symlink_to(os.readlink(path))
             else:
                 shutil.copy2(path, target)
-        for path in package.rglob("*"):
-            if path.is_symlink() and package not in path.resolve(strict=True).parents:
-                fail(f"packaged symlink escapes its package: {path}")
+        for component in release_dirs:
+            root = package / component
+            for path in root.rglob("*"):
+                if path.is_symlink() and (os.path.isabs(os.readlink(path))
+                                         or root not in path.resolve(strict=True).parents):
+                    fail(f"packaged symlink escapes its component: {path}")
+        # The manifest describes the copied payload, not an earlier input header.
+        elf = inspect_binaries(package, required_files)
         if git(source, "rev-parse", "HEAD") != head or git(source, "status", "--porcelain", "--untracked-files=all"):
             fail("source checkout changed while packaging")
 
@@ -198,7 +211,7 @@ def main():
             "packaged_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "source_commit": head, "source_checkout_clean": True,
             "source_checkout": str(source), "build_output": str(output),
-            "build_record": record, "build_record_sha256": sha256(record_path),
+            "build_record": record, "build_record_sha256": hashlib.sha256(record_bytes).hexdigest(),
             "be_elf": elf,
             "build_record_provenance": "caller-supplied; not an independently executed build",
             "validation_scope": "ELF header, FE entry class/ZIP CRC, release layout, clean source, file hashes",
@@ -228,10 +241,33 @@ def main():
         (temporary / f"{archive.name}.sha256").write_text(f"{sha256(archive)}  {archive.name}\n", encoding="utf-8")
         shutil.copytree(metadata, temporary / "package-manifest")
         shutil.rmtree(package)
-        # Do not replace an existing destination, including one created during compression.
-        if destination.exists() or destination.is_symlink():
-            fail("destination appeared during packaging; refusing to overwrite")
-        temporary.rename(destination)
+        # mkdir reserves the new destination atomically. rename of a directory
+        # alone can overwrite an empty directory created after an exists check.
+        destination.mkdir()
+        reserved = destination.stat()
+        published = [(destination, reserved.st_dev, reserved.st_ino)]
+        try:
+            for path in sorted(temporary.rglob("*")):
+                target = destination / path.relative_to(temporary)
+                if path.is_dir():
+                    target.mkdir()
+                else:
+                    # Same-filesystem hard links publish complete files and fail
+                    # if another writer has already created the target name.
+                    os.link(path, target)
+                info = target.lstat()
+                published.append((target, info.st_dev, info.st_ino))
+        except OSError:
+            # Only remove entries created by this invocation, still with the
+            # recorded identity. rmdir preserves directories with other content.
+            for path, device, inode in reversed(published):
+                try:
+                    info = path.lstat()
+                    if (info.st_dev, info.st_ino) == (device, inode):
+                        path.rmdir() if stat.S_ISDIR(info.st_mode) else path.unlink()
+                except OSError:
+                    pass
+            raise
         print(f"Packaged: {destination / archive.name}")
         print("Packaging only: runtime, regression and upgrade validation are still separate.")
     finally:
