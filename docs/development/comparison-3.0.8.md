@@ -1,0 +1,69 @@
+# 精确 3.0.8 与最新源码、正式发行版的 NULL-safe Join 差异
+
+核查日期：2026-09-11。本文件依据 Apache Doris 官方 GitHub 的提交、tag、release、PR 及不可变提交下的源码，更新早期候选研究中小版本未知的状态。数据库二进制实测见 [验证记录](null-safe-join-validation.md)，源码结论与运行结论分别标注。
+
+**结论：线上所报 `doris-3.0.8-rc01-09b0cc49a6` 的对应源码已经包含此前六组旧修复。新发现的 #65975 是另一条单字符串 NULL-safe Join 漏匹配路径：master 已修复；正式 4.1.4、4.0.8 的核查源码仍有该路径且未包含此修复；3.0.8 的 nullable `<=>` 会绕开这条单列优化路径。版本较高不能直接推出当前 SQL 更正确，也不能据此将生产历史崩溃归因到 #65975。**
+
+最终发行包实验与此源码判断一致：**精确 3.0.8 为 100 / 100 通过，正式 4.1.4 为 80 通过、20 项单字符串表达式 NULL 匹配错误**。两版六键三种形态各 15 / 15 通过，BE 未重启。4.0.8、4.1.3 仅核查源码，master 未构建实测；不能把这些对象混写为同一验证状态。完整命令、包校验、结果与范围见 [验证记录](null-safe-join-validation.md)。
+
+用户截图的实际错误仍是 FE 规则 `block_null_safe_equal` 拦截，未证明该次请求进入 BE 后崩溃。新提供的版本串缩小了代码比较范围，没有提供生产崩溃栈。版本串与官方提交一致，也不代替对 FE、各 BE 实际二进制及一致性的核验。
+
+## 1. 版本身份：正式发行版与分支 HEAD 分开
+
+| 对象 | 不可变源码提交 | 直接证据 |
+|---|---|---|
+| 用户所报 3.0.8-rc01-09b0cc49a6 | `09b0cc49a60ffdd444df3e40e5f3dc180299b561` | [提交](https://github.com/apache/doris/commit/09b0cc49a60ffdd444df3e40e5f3dc180299b561)标题为 bump to 3.0.8；[PR #55477](https://github.com/apache/doris/pull/55477)于 2025-08-29 合入 **branch-3.0**；[tag API](https://api.github.com/repos/apache/doris/git/ref/tags/3.0.8-rc01)直接指向该 commit。 |
+| 官方 3.0.8 Release | 同上 | [release](https://github.com/apache/doris/releases/tag/3.0.8-rc01)使用 tag `3.0.8-rc01`；[API](https://api.github.com/repos/apache/doris/releases/tags/3.0.8-rc01)为 `draft=false`、`prerelease=false`，发布时间 **2025-09-08 15:38:48 UTC**。存在另一个 rc02 tag 不改变本次精确 rc01 身份。 |
+| 本次查询时最新官方 GitHub Release：4.1.4 | `ad35a140c7fd0b842f18c23300bac581f7d04326` | [release](https://github.com/apache/doris/releases/tag/4.1.4-rc04)名称 **Apache Doris 4.1.4 Release**，tag `4.1.4-rc04`；[API](https://api.github.com/repos/apache/doris/releases/tags/4.1.4-rc04)为 `draft=false`、`prerelease=false`，发布时间 **2026-09-07 02:44:10 UTC**。[annotated tag 对象](https://api.github.com/repos/apache/doris/git/tags/9663b7afc7a8ffc56821accdc80f5b16849e7175)解引用到本行 commit。 |
+| 官网仍展示的 4.1.3 | `7126cf65d96ebc43fce0906f51e92c1a2ccf24a6` | [release](https://github.com/apache/doris/releases/tag/4.1.3)，2026-07-13 发布；[tag 对象](https://api.github.com/repos/apache/doris/git/tags/5d5ba817b1a4600d422ca14c838f16a72a0ec079)。 |
+| 最新 4.0 正式发行版：4.0.8 | `bc8ea1bac6d62d92cdebd2e3ac33cc668961ec36` | [release](https://github.com/apache/doris/releases/tag/4.0.8)，2026-08-14 发布；[tag 对象](https://api.github.com/repos/apache/doris/git/tags/e3d7cbbce15969b8743376508cc981543bdc1ff1)。 |
+| 本次最终刷新 upstream master | `60042611fea1b18576470a7e3c49e14cd11243a4` | 起始核查快照为 `9125fd692271ef6292a73000f4f95d53ecb24ee3`。主调查已核对新增两提交仅修改 SNII 注释和协议 golden 测试，本文 Hash Join/RF/Nullable 相关源码未变；故详细永久链接保留起始快照。这是开发分支，**不是 4.1.4 发布包**。 |
+
+本次网页抓取中，[英文下载页](https://doris.apache.org/download/)和[中文入口](https://doris.apache.org/zh-CN/download/)均返回了显示 `4.1.3 Latest / 4.0.8 Stable` 的内容；主调查此前看到中文页 4.1.4，说明页面展示/缓存存在不一致。确定本次“最新正式 release”采用官方 GitHub release 的名称、tag、发布时间和 `prerelease=false`，并对 tag 解引用后的源码比较。不能仅凭 tag 带 `rc` 否定正式发布身份，也不能将网页版本文案当成补丁包含证明。[4.1.4 发布记录](https://github.com/apache/doris/issues/67355)没有列出 #65975；最终缺失判断来自下文源码，非仅凭发布说明未提及。
+
+## 2. 此前六组旧缺陷：精确 3.0.8 均已有处理
+
+本表的“已有”指目标提交的实际代码已具有修复行为，不要求历史 diff 一字不变，也不表示所有同类崩溃均被排除。历史 backport/发布归属详见 [候选修复](null-safe-join-candidates.md)；现在使用精确 tag 源码，比仅看 `dev/3.x-merged` 标签更直接。
+
+| 旧修复 | 3.0.8-rc01 对应源码证据 | 精确版本结论 |
+|---|---|---|
+| [#36263](https://github.com/apache/doris/pull/36263)，`56ac97616d3f33c70b3e375b009c6316de667ada`：两侧 non-nullable 的 `<=>` 被错误按 nullable key 处理 | [build init:521-540](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/be/src/pipeline/exec/hashjoin_build_sink.cpp#L521-L540)与[probe init:523-541](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/be/src/pipeline/exec/hashjoin_probe_operator.cpp#L523-L541)均要求 `EQ_FOR_NULL && (right nullable || left nullable)`。 | **已有**；不能再将“3.0.8 缺少 #36263”作为事故原因。 |
+| [#32623](https://github.com/apache/doris/pull/32623)，`4127f452c49ce3df8d949450b106bd0987333adb`：build key 转 Nullable 后哈希表类型未同步 | [build:453-469](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/be/src/pipeline/exec/hashjoin_build_sink.cpp#L453-L469)按 `_should_convert_to_nullable` 对 `data_type` 调用 `make_nullable`，然后传入 fixed-key 选择器；[实际列:269-280](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/be/src/pipeline/exec/hashjoin_build_sink.cpp#L269-L280)采用对应转换标记。 | **已有**；若仍在 `get_raw_data/pack_fixeds` 崩溃，应找另一处类型不一致，不能直接重复旧补丁。 |
+| [#34602](https://github.com/apache/doris/pull/34602)，`640f88471a8df0d9a676880c59ce906079b7776c`：RF argument 强转 Nullable | [util.hpp:185-209](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/be/src/vec/utils/util.hpp#L185-L209)结果分支用 `has_null()`，argument 分支用 `argument != nullptr && argument->has_null()`。 | **已有**。补充候选 [#33869](https://github.com/apache/doris/pull/33869) 的字符串 nullmap 检查也已在 [hybrid_set.h:454](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/be/src/exprs/hybrid_set.h#L454)和[621](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/be/src/exprs/hybrid_set.h#L621)改为 `nullmap == nullptr || !nullmap[i]`。 |
+| [#38058](https://github.com/apache/doris/pull/38058)，`829de217d6b1d2f7e13359e3031109e9ded82382`：RF size RPC 回调使用已析构的裸 filter 指针 | [SyncSizeClosure:1075-1120](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/be/src/exprs/runtime_filter.cpp#L1075-L1120)已演变为 `weak_ptr<RuntimeFilterContext>`，回调先 `lock()`，失败返回；[调用处:1165-1171](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/be/src/exprs/runtime_filter.cpp#L1165-L1171)传上下文。 | **已有且继续演化**；不能将当前实现误写为永久持有 shared_ptr，旧裸 `IRuntimeFilter*` 问题已处理。 |
+| [#43758](https://github.com/apache/doris/pull/43758)，`0aba1ed7784decace38efd9f97d677da75dc6bcf`：VARCHAR/CHAR BloomFilter 类型不一致 | [create_predicate_function.h:231-237](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/be/src/exprs/create_predicate_function.h#L231-L237)新建目标类型 `filter_olap`、`light_copy`，最终向 `BloomFilterColumnPredicate<PT>` 传 **filter_olap**。 | **已有**；也与 [3.0 backport #43919](https://github.com/apache/doris/pull/43919)及 [3.0.3 发布说明](https://github.com/apache/doris/issues/44522)一致。 |
+| [#47034](https://github.com/apache/doris/pull/47034)，`3749b7b8e0a43978910a078aaf59b10447cc2672`：RF disable 后 bloom_filter_func 为空仍读取 | [runtime_filter.cpp:373-376](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/be/src/exprs/runtime_filter.cpp#L373-L376)直接用 `_context->bloom_filter_func && ...get_build_bf_cardinality()`。 | **已有**；与 [3.0 backport #47052](https://github.com/apache/doris/pull/47052)一致，不能在该位置重复追加同样判空。 |
+
+另外，[#62627](https://github.com/apache/doris/pull/62627)修复的是较新三参 `CastExpr` 参数传错。精确 3.0.8 的 [RuntimeFilterTranslator.java:132-135](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/fe/fe-core/src/main/java/org/apache/doris/nereids/glue/translator/RuntimeFilterTranslator.java#L132-L135)仍为两参 `new CastExpr(src.getType(), targetExpr)`，并不含该特定错误调用。
+
+“六组旧修复已有”不代表精确 3.0.8 没有其他执行链风险。最新 [#67755](https://github.com/apache/doris/commit/9125fd692271ef6292a73000f4f95d53ecb24ee3)处理 RPC attachment 释放和 Exchange callback 重入复用；精确 3.0.8 仍有相关复用模式，详见 [候选证据](null-safe-join-candidates.md)。这项 master 修复不涉及 `<=>` key 算法，本次未做对应竞态复现，尚不能与生产事故关联。
+
+## 3. 新单字符串路径 #65975：master 修复，不等于 4.1.4 修复
+
+[PR #65975](https://github.com/apache/doris/pull/65975)于 2026-07-30 合入 master，commit [e5b67e095b4fd40acd656ad25aed6bf5d8b52718](https://github.com/apache/doris/commit/e5b67e095b4fd40acd656ad25aed6bf5d8b52718)。核心问题是单字符串键的 NULL 行被送入独立 null bucket 后，仍比较嵌套字符串残留字节，造成应匹配的 `NULL <=> NULL` 漏行；**修复目标是结果正确性，并非 BE crash**。修复给 `MethodStringNoCache::init_serialized_keys_impl` 传 nullmap，把 NULL 行存成规范空 `StringRef`，同时让空 StringRef 相等检查避免对空指针调用 `memcmp`。PR 另有 ASOF JOIN 语法限制，不对应本次 INNER JOIN。
+
+| 核查版本 | NULL-safe 单字符串实际选型 | #65975 核心规范化 | 源码层判断（实测范围见上文） |
+|---|---|---|---|
+| 精确 3.0.8-rc01，`09b0cc49a6…` | nullable `<=>` 令 `_store_null_in_hash_table=true`，单列优化要求其为 false，所以不会进入此 `MethodOneString` 路径 | 没有 2026 年新增代码 | **不能判为受该缺陷影响**：旧版本没有该 NULL-safe 单列优化的触发路径；字符串走带 NULL 表示的 serialized key。不能为此直接 backport #65975。 |
+| 正式 4.1.3，`7126cf65d96e…` | 单列 `_serialize_null_into_key=false`，拆分 nested column + external nullmap | [源码:373-404](https://github.com/apache/doris/blob/7126cf65d96ebc43fce0906f51e92c1a2ccf24a6/be/src/exec/common/hash_table/hash_map_context.h#L373-L404)没有 | 存在目标路径与旧行为。 |
+| 最新正式 4.1.4，`ad35a140c7fd…` | 同上；见下方完整调用链 | [源码:373-404](https://github.com/apache/doris/blob/ad35a140c7fd0b842f18c23300bac581f7d04326/be/src/exec/common/hash_table/hash_map_context.h#L373-L404)没有 | **该正式版本仍未包含 #65975 的核心修复，且源码满足问题路径前提**；不能说升级至 4.1.4 自动修好它。 |
+| 最新 4.0 正式版 4.0.8，`bc8ea1bac6d6…` | [build:739-747](https://github.com/apache/doris/blob/bc8ea1bac6d62d92cdebd2e3ac33cc668961ec36/be/src/pipeline/exec/hashjoin_build_sink.cpp#L739-L747)单列用 external nullmap；[657-661](https://github.com/apache/doris/blob/bc8ea1bac6d62d92cdebd2e3ac33cc668961ec36/be/src/pipeline/exec/hashjoin_build_sink.cpp#L657-L661)去除 Nullable 后选型 | [context:326-357](https://github.com/apache/doris/blob/bc8ea1bac6d62d92cdebd2e3ac33cc668961ec36/be/src/vec/common/hash_table/hash_map_context.h#L326-L357)没有 | 同样存在目标路径、缺少核心修复；本次未取得该发行版的实际执行结果。 |
+| 本次最终 master，`60042611fea1…` | 保留新的单列优化 | [context 中已含规范化](https://github.com/apache/doris/blob/9125fd692271ef6292a73000f4f95d53ecb24ee3/be/src/exec/common/hash_table/hash_map_context.h)，相关内容与最终快照一致 | **源码已有此具体修复**；不表示是可直接替换生产包的正式发行版，也不表示其他 Join/RF 问题不存在。 |
+
+Backport 核查：主 PR 的标签仍为 `dev/4.1.x`、`dev/4.1.x-conflict`；按 PR 号和标题检索未发现已合并的 4.1/4.0 backport。标签与搜索结果本身不是“整个分支绝无等价修复”的证明；这里另读了本次 4.1/4.0 分支快照及上述正式 tag 的实现，均仍直接使用 NULL 行残留字节。[#66148](https://github.com/apache/doris/pull/66148)是仍未合并的后续 null bucket 语义改造，不是已发布 backport。以后核查须重新固定版本/commit，不能永久沿用本结论。
+
+## 4. 最短源码阅读：为什么更高版本反而出现这条路径
+
+1. **3.0.8 先看两个条件**：[build init:522-540](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/be/src/pipeline/exec/hashjoin_build_sink.cpp#L522-L540)令 nullable `<=>` 存 NULL；[_hash_table_init:394](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/be/src/pipeline/exec/hashjoin_build_sink.cpp#L394)要求 `size()==1 && !_store_null_in_hash_table[0]` 才走单列优化。故 nullable `<=>` 不走后面的 `MethodOneString`。字符串不满足 fixed-size 条件时，走 [453-469 的 SerializedHashTableContext](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/be/src/pipeline/exec/hashjoin_build_sink.cpp#L453-L469)。
+2. **4.1.4 则先拆 NULL 表示**：[764-769](https://github.com/apache/doris/blob/ad35a140c7fd0b842f18c23300bac581f7d04326/be/src/exec/operator/hashjoin_build_sink.cpp#L764-L769)对所有单列 key 强制 `_serialize_null_into_key=false`；[561-569](https://github.com/apache/doris/blob/ad35a140c7fd0b842f18c23300bac581f7d04326/be/src/exec/operator/hashjoin_build_sink.cpp#L561-L569)拆 nested column 和 external nullmap；[682-702](https://github.com/apache/doris/blob/ad35a140c7fd0b842f18c23300bac581f7d04326/be/src/exec/operator/hashjoin_build_sink.cpp#L682-L702)去 Nullable 并初始化哈希方法。[hash_key_type.h:104-125](https://github.com/apache/doris/blob/ad35a140c7fd0b842f18c23300bac581f7d04326/be/src/exec/common/hash_table/hash_key_type.h#L104-L125)单字符串得到 `string_key`；[join_utils.h:127-128](https://github.com/apache/doris/blob/ad35a140c7fd0b842f18c23300bac581f7d04326/be/src/exec/common/join_utils.h#L127-L128)选择 `MethodOneString`，其 [86-87](https://github.com/apache/doris/blob/ad35a140c7fd0b842f18c23300bac581f7d04326/be/src/exec/common/join_utils.h#L86-L87)就是 `MethodStringNoCache`。
+3. **最后看 NULL 行有没有规范化**：4.1.4 [context:373-404](https://github.com/apache/doris/blob/ad35a140c7fd0b842f18c23300bac581f7d04326/be/src/exec/common/hash_table/hash_map_context.h#L373-L404)仍由每行 offset 直接生成 StringRef；对照 [#65975 diff](https://github.com/apache/doris/pull/65975/files)新增的 nullmap 条件即可判断此补丁是否包含。只搜“有没有 MethodStringNoCache”或只比版本号无法做这个判断。
+
+## 5. 六键与 Runtime Filter：能推导什么，仍缺什么
+
+截图是六键 `GROUP BY COUNT(*)` 后以六个 `<=>` 与原行 INNER JOIN。**若物理 Hash Join 仍保留六个 key**，它属于多列路径；上述单列字符串规范化缺陷不能直接解释它。3.0.8 的 [fixed-key 选择器](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/be/src/vec/common/hash_table/hash_map_context_creator.h#L79-L103)依据 nullable/type/宽度选 fixed 或 serialized；[ColumnNullable::serialize_vec](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/be/src/vec/columns/column_nullable.cpp#L255-L259)携带 nullmap。4.1.4 的 [767-769](https://github.com/apache/doris/blob/ad35a140c7fd0b842f18c23300bac581f7d04326/be/src/exec/operator/hashjoin_build_sink.cpp#L767-L769)同样让多列 null-safe key 序列化 NULL 标记。最终须看 EXPLAIN；不能仅凭 SQL 文本“六个条件”就排除优化器将物理 key 化简的可能。
+
+精确 3.0.8 已支持为 `<=>` 生成 null-aware RF：[RuntimeFilterGenerator:267-281](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/fe/fe-core/src/main/java/org/apache/doris/nereids/processor/post/RuntimeFilterGenerator.java#L267-L281)处理 `EqualPredicate`；[planner/RuntimeFilter.java:262-269](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/fe/fe-core/src/main/java/org/apache/doris/planner/RuntimeFilter.java#L262-L269)从 `EQ_FOR_NULL` 设置 `null_aware=true`；[BE:1403-1404](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/be/src/exprs/runtime_filter.cpp#L1403-L1404)接收该标记，IN/Bloom 等路径有相应处理。不能写成“NULL-safe Join 必然不开 RF”，也不能把 `SET runtime_filter_mode='GLOBAL'` 当成 RF 实际生成、下推并生效的证据。
+
+本轮源码比较没有定位一处需要修改最新 master 才能修复**生产六键崩溃**的代码：六组旧缺陷在精确 3.0.8 已处理，新单字符串错误在 master 已处理，且截图只提供 FE 拦截错误。因此目前没有依据给 master 添加猜测性判空补丁。接下来应以隔离测试的真实版本、实际计划、独立预期结果和生产故障栈区分：六键结果正确性、单列字符串漏匹配、RF 生命周期崩溃。任何一类实验的通过或失败都不能替代另一类证据。
+
+本文件检查范围为精确 tag/API 身份、上述代码路径及 PR/backport 元数据；没有以静态源码证明运行正确性。发行包校验与 SQL 实测范围见 [验证记录](null-safe-join-validation.md)，不包含 master 构建、性能压测或升级兼容性验证。
