@@ -131,6 +131,58 @@ TEST(HashTableMethodTest, testMethodStringNoCache) {
               {0, 1, -1, 3, -1, 4});
 }
 
+template <typename StringColumn>
+void test_string_null_key_normalization() {
+    auto nested = StringColumn::create();
+    nested->insert_data("a", 1);
+    nested->insert_data("residual", 8);
+    nested->insert_data("", 0);
+    auto null_column = ColumnHelper::create_column<DataTypeUInt8>({0, 1, 0});
+    auto column = ColumnNullable::create(std::move(nested), std::move(null_column));
+    const auto& null_map = column->get_null_map_data();
+    constexpr uint32_t bucket_size = 8;
+
+    // Join extracts the nested column and passes its null map separately. Also
+    // cover a nullable column directly, as accepted by the hash method API.
+    for (bool nullable_input : {false, true}) {
+        MethodStringNoCache<StringHashMap<IColumn::ColumnIndex>> method;
+        ColumnRawPtrs key_columns {nullable_input ? column.get() : &column->get_nested_column()};
+        for (bool is_build : {false, true}) {
+            method.init_serialized_keys(key_columns, 3, null_map.data(), true, is_build,
+                                        bucket_size);
+            const auto& keys = is_build ? method._build_stored_keys : method._stored_keys;
+            ASSERT_EQ(keys.size(), 3);
+            EXPECT_TRUE(keys[0] == StringRef("a", 1));
+            EXPECT_TRUE(keys[1] == StringRef());
+            EXPECT_TRUE(keys[2] == StringRef("", 0));
+            EXPECT_EQ(method.bucket_nums[1], bucket_size);
+            EXPECT_LT(method.bucket_nums[0], bucket_size);
+            EXPECT_LT(method.bucket_nums[2], bucket_size);
+        }
+        EXPECT_TRUE(method._build_stored_keys[1] == method._stored_keys[1]);
+        // Normalization must not mutate the shared input column's payload.
+        EXPECT_TRUE(column->get_nested_column().get_data_at(1) == StringRef("residual", 8));
+
+        // Without an external null map, preserve the original keys and the
+        // aggregation sub-table grouping used by this release branch.
+        method.init_serialized_keys(key_columns, 3);
+        EXPECT_TRUE(method._stored_keys[1] == StringRef("residual", 8));
+        const auto& groups = method.get_sub_table_groups();
+        ASSERT_EQ(groups.group_row_indices[0].size(), 1);
+        EXPECT_EQ(groups.group_row_indices[0][0], 2);
+        ASSERT_EQ(groups.group_row_indices[3].size(), 1);
+        EXPECT_EQ(groups.group_row_indices[3][0], 1);
+    }
+}
+
+TEST(HashTableMethodTest, testMethodStringNoCacheNullKeyNormalized) {
+    test_string_null_key_normalization<ColumnString>();
+}
+
+TEST(HashTableMethodTest, testMethodString64NoCacheNullKeyNormalized) {
+    test_string_null_key_normalization<ColumnString64>();
+}
+
 static AggregateDataPtr make_mapped(size_t val) {
     return reinterpret_cast<AggregateDataPtr>(val);
 }

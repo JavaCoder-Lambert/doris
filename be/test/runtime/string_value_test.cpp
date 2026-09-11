@@ -33,6 +33,19 @@ StringRef FromStdString(const string& str) {
     return StringRef(ptr, len);
 }
 
+TEST(StringRefTest, TestEmptyEquality) {
+    const StringRef default_empty;
+    const StringRef string_empty("", 0);
+    const StringRef non_empty("x", 1);
+
+    EXPECT_TRUE(default_empty == StringRef());
+    EXPECT_TRUE(default_empty == string_empty);
+    EXPECT_TRUE(string_empty == default_empty);
+    EXPECT_FALSE(default_empty != string_empty);
+    EXPECT_FALSE(default_empty == non_empty);
+    EXPECT_FALSE(non_empty == default_empty);
+}
+
 TEST(StringRefTest, TestCompare) {
     std::string empty_str = "";
     std::string str1_str = "abc";
