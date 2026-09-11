@@ -96,6 +96,8 @@ public:
     //  Will delete itself
     void Run() override {
         Defer defer {[&]() { delete this; }};
+        // Release the completed RPC's payload before a callback can start another RPC.
+        cntl_->request_attachment().clear();
         // If lock failed, it means the callback object is deconstructed, then no need
         // to deal with the callback any more.
         if (auto tmp = callback_.lock()) {

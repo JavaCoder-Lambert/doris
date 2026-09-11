@@ -139,14 +139,15 @@ void test_string_null_key_normalization() {
     nested->insert_data("", 0);
     auto null_column = ColumnHelper::create_column<DataTypeUInt8>({0, 1, 0});
     auto column = ColumnNullable::create(std::move(nested), std::move(null_column));
-    const auto& null_map = column->get_null_map_data();
+    const ColumnNullable& input = *column;
+    const auto& null_map = input.get_null_map_data();
     constexpr uint32_t bucket_size = 8;
 
     // Join extracts the nested column and passes its null map separately. Also
     // cover a nullable column directly, as accepted by the hash method API.
     for (bool nullable_input : {false, true}) {
         MethodStringNoCache<StringHashMap<IColumn::ColumnIndex>> method;
-        ColumnRawPtrs key_columns {nullable_input ? column.get() : &column->get_nested_column()};
+        ColumnRawPtrs key_columns {nullable_input ? &input : &input.get_nested_column()};
         for (bool is_build : {false, true}) {
             method.init_serialized_keys(key_columns, 3, null_map.data(), true, is_build,
                                         bucket_size);
@@ -161,7 +162,7 @@ void test_string_null_key_normalization() {
         }
         EXPECT_TRUE(method._build_stored_keys[1] == method._stored_keys[1]);
         // Normalization must not mutate the shared input column's payload.
-        EXPECT_TRUE(column->get_nested_column().get_data_at(1) == StringRef("residual", 8));
+        EXPECT_TRUE(input.get_nested_column().get_data_at(1) == StringRef("residual", 8));
 
         // Without an external null map, preserve the original keys and the
         // aggregation sub-table grouping used by this release branch.
