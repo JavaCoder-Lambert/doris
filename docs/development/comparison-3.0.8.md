@@ -36,7 +36,7 @@
 
 另外，[#62627](https://github.com/apache/doris/pull/62627)修复的是较新三参 `CastExpr` 参数传错。精确 3.0.8 的 [RuntimeFilterTranslator.java:132-135](https://github.com/apache/doris/blob/09b0cc49a60ffdd444df3e40e5f3dc180299b561/fe/fe-core/src/main/java/org/apache/doris/nereids/glue/translator/RuntimeFilterTranslator.java#L132-L135)仍为两参 `new CastExpr(src.getType(), targetExpr)`，并不含该特定错误调用。
 
-“六组旧修复已有”不代表精确 3.0.8 没有其他执行链风险。最新 [#67755](https://github.com/apache/doris/commit/9125fd692271ef6292a73000f4f95d53ecb24ee3)处理 RPC attachment 释放和 Exchange callback 重入复用；精确 3.0.8 仍有相关复用模式，详见 [候选证据](null-safe-join-candidates.md)。这项 master 修复不涉及 `<=>` key 算法。后续已在 4.1.4 的 x86_64 ASAN 定向测试中复现四项回调重入/资源释放错误，见 [交付记录](4.1.4-null-safe-fix.md)；该结果不是 3.0.8 生产网络竞态或历史 crash 的复现，尚不能与生产事故关联。
+“六组旧修复已有”不代表精确 3.0.8 没有其他执行链风险。最新 [#67755](https://github.com/apache/doris/commit/9125fd692271ef6292a73000f4f95d53ecb24ee3)处理 RPC attachment 释放和 Exchange callback 重入复用；精确 3.0.8 仍有相关复用模式，详见 [候选证据](null-safe-join-candidates.md)。这项 master 修复不涉及 `<=>` key 算法。后续已在 4.1.4 的 x86_64 ASAN 定向测试中复现四项回调重入/资源释放错误；修复提交 `8048d149` 对应代码的 11 项 focused 单测全部通过，见 [交付记录](4.1.4-null-safe-fix.md)。该结果不是 3.0.8 生产网络竞态或历史 crash 的复现，尚不能与生产事故关联。
 
 ## 3. 新单字符串路径 #65975：master 修复，不等于 4.1.4 修复
 
