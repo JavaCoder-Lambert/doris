@@ -236,16 +236,7 @@ TEST_F(ExchangeSinkTest, test_queue_size) {
 
 TEST_F(ExchangeSinkTest, ReentrantRpcPreservesCompletedResponse) {
     using Callback = ExchangeSendCallback<PTransmitDataResult>;
-    using BaseClosure = AutoReleaseClosure<PTransmitDataParams, Callback>;
-    class ObservedClosure : public BaseClosure {
-    public:
-        using BaseClosure::BaseClosure;
-        int* reported_errors = nullptr;
-
-    protected:
-        void _process_if_rpc_failed() override { ++*reported_errors; }
-        void _process_if_meet_error_status(const Status&) override { ++*reported_errors; }
-    };
+    using Closure = AutoReleaseClosure<PTransmitDataParams, Callback>;
 
     auto state = std::make_shared<MockRuntimeState>();
     auto buffer = create_buffer(state);
@@ -254,41 +245,53 @@ TEST_F(ExchangeSinkTest, ReentrantRpcPreservesCompletedResponse) {
     auto* instance = buffer->_rpc_instances[dest_ins_id_1].get();
     auto callback = channel->get_send_callback(instance, false);
     callback->start_rpc_time = 0;
+    Status::OK().to_protobuf(callback->response_->mutable_status());
+    std::shared_ptr<Callback> next_callback;
     int callbacks = 0;
     int reported_errors = 0;
 
-    callback->addSuccessHandler([&](RpcInstance* ins, const bool&,
+    callback->addSuccessHandler([&](RpcInstance* ins, const bool& eos,
                                     const PTransmitDataResult& response, const int64_t&) {
         ++callbacks;
         // Model the next RPC completing while the previous success callback is on the stack.
-        auto next_callback = channel->get_send_callback(ins, true);
+        next_callback = channel->get_send_callback(ins, true);
+        next_callback->start_rpc_time = 0;
         Status::InternalError("second RPC response")
                 .to_protobuf(next_callback->response_->mutable_status());
+        EXPECT_FALSE(eos);
         EXPECT_TRUE(Status::create(response.status()).ok());
+        EXPECT_TRUE(Status::create(callback->response_->status()).ok());
     });
     callback->addFailedHandler([&](RpcInstance*, const std::string&) { ++reported_errors; });
 
-    auto closure = std::unique_ptr<ObservedClosure>(
-            ::new ObservedClosure(std::make_shared<PTransmitDataParams>(), callback));
-    closure->reported_errors = &reported_errors;
+    auto closure = Closure::create_unique(std::make_shared<PTransmitDataParams>(), callback);
     closure.release()->Run();
     EXPECT_EQ(callbacks, 1);
-    // Run() must inspect the completed RPC, not report the next RPC's failure.
+    EXPECT_EQ(reported_errors, 0);
+    ASSERT_NE(next_callback, nullptr);
+    EXPECT_TRUE(Status::create(callback->response_->status()).ok());
+    EXPECT_TRUE(Status::create(next_callback->response_->status()).is<ErrorCode::INTERNAL_ERROR>());
+
+    int next_callbacks = 0;
+    next_callback->addSuccessHandler([&](RpcInstance* ins, const bool& eos,
+                                         const PTransmitDataResult& response, const int64_t&) {
+        ++next_callbacks;
+        EXPECT_EQ(ins, instance);
+        EXPECT_TRUE(eos);
+        EXPECT_TRUE(Status::create(response.status()).is<ErrorCode::INTERNAL_ERROR>());
+        EXPECT_TRUE(Status::create(callback->response_->status()).ok());
+    });
+    next_callback->addFailedHandler([&](RpcInstance*, const std::string&) { ++reported_errors; });
+    auto next_closure =
+            Closure::create_unique(std::make_shared<PTransmitDataParams>(), next_callback);
+    next_closure.release()->Run();
+    EXPECT_EQ(next_callbacks, 1);
     EXPECT_EQ(reported_errors, 0);
 }
 
 TEST_F(ExchangeSinkTest, ReentrantRpcPreservesCompletedController) {
     using Callback = ExchangeSendCallback<PTransmitDataResult>;
-    using BaseClosure = AutoReleaseClosure<PTransmitDataParams, Callback>;
-    class ObservedClosure : public BaseClosure {
-    public:
-        using BaseClosure::BaseClosure;
-        int* reported_errors = nullptr;
-
-    protected:
-        void _process_if_rpc_failed() override { ++*reported_errors; }
-        void _process_if_meet_error_status(const Status&) override { ++*reported_errors; }
-    };
+    using Closure = AutoReleaseClosure<PTransmitDataParams, Callback>;
 
     auto state = std::make_shared<MockRuntimeState>();
     auto buffer = create_buffer(state);
@@ -297,23 +300,45 @@ TEST_F(ExchangeSinkTest, ReentrantRpcPreservesCompletedController) {
     auto* instance = buffer->_rpc_instances[dest_ins_id_1].get();
     auto callback = channel->get_send_callback(instance, false);
     callback->start_rpc_time = 0;
+    std::shared_ptr<Callback> next_callback;
     int callbacks = 0;
     int reported_errors = 0;
 
     callback->addSuccessHandler(
-            [&](RpcInstance* ins, const bool&, const PTransmitDataResult&, const int64_t&) {
+            [&](RpcInstance* ins, const bool& eos, const PTransmitDataResult&, const int64_t&) {
                 ++callbacks;
-                auto next_callback = channel->get_send_callback(ins, true);
+                next_callback = channel->get_send_callback(ins, true);
+                next_callback->start_rpc_time = 0;
                 next_callback->cntl_->SetFailed("second RPC transport failure");
+                EXPECT_FALSE(eos);
+                EXPECT_FALSE(callback->cntl_->Failed());
+                EXPECT_TRUE(next_callback->cntl_->Failed());
             });
     callback->addFailedHandler([&](RpcInstance*, const std::string&) { ++reported_errors; });
 
-    auto closure = std::unique_ptr<ObservedClosure>(
-            ::new ObservedClosure(std::make_shared<PTransmitDataParams>(), callback));
-    closure->reported_errors = &reported_errors;
+    auto closure = Closure::create_unique(std::make_shared<PTransmitDataParams>(), callback);
     closure.release()->Run();
     EXPECT_EQ(callbacks, 1);
-    // The next RPC's transport failure must not change the completed RPC's status.
+    EXPECT_EQ(reported_errors, 0);
+    ASSERT_NE(next_callback, nullptr);
+    EXPECT_FALSE(callback->cntl_->Failed());
+    EXPECT_TRUE(next_callback->cntl_->Failed());
+
+    int next_failures = 0;
+    next_callback->addSuccessHandler(
+            [&](RpcInstance*, const bool&, const PTransmitDataResult&, const int64_t&) {
+                ADD_FAILURE() << "The next RPC's transport failure must reach its failed handler";
+            });
+    next_callback->addFailedHandler([&](RpcInstance* ins, const std::string& error) {
+        ++next_failures;
+        EXPECT_EQ(ins, instance);
+        EXPECT_NE(error.find("second RPC transport failure"), std::string::npos);
+        EXPECT_FALSE(callback->cntl_->Failed());
+    });
+    auto next_closure =
+            Closure::create_unique(std::make_shared<PTransmitDataParams>(), next_callback);
+    next_closure.release()->Run();
+    EXPECT_EQ(next_failures, 1);
     EXPECT_EQ(reported_errors, 0);
 }
 

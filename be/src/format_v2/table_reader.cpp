@@ -511,6 +511,11 @@ DataTypePtr restore_current_primitive_type(const schema::external::TField& field
     }
     DORIS_CHECK(fallback_type != nullptr);
     const auto primitive_type = thrift_to_type(field.type.type);
+    if (primitive_type == TYPE_VARIANT) {
+        // TColumnType predates the execution-only variant_is_v2 marker. Reconstructing from its
+        // primitive enum would silently replace an Iceberg compute-V2 carrier with legacy VARIANT.
+        return fallback_type;
+    }
     if (is_complex_type(primitive_type)) {
         return fallback_type;
     }
@@ -1349,6 +1354,8 @@ Status TableReader::refresh_conjuncts(VExprContextSPtrs conjuncts,
         }
     }
     RETURN_IF_ERROR(customize_file_scan_request(refreshed_request.get()));
+    RETURN_IF_ERROR(
+            refreshed_mapper->reconcile_scan_request_after_customization(refreshed_request.get()));
     if (_file_scan_request == nullptr ||
         !same_physical_scan_layout(*refreshed_request, *_file_scan_request)) {
         // A reader cannot reinterpret columns already materialized with another block layout.

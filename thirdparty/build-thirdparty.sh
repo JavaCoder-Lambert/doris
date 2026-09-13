@@ -410,9 +410,13 @@ build_thrift() {
     check_if_source_exist "${THRIFT_SOURCE}"
     cd "${TP_SOURCE_DIR}/${THRIFT_SOURCE}"
 
+    # Headers of a previously installed thrift would shadow the in-tree ones
+    # via -I${TP_INCLUDE_DIR} and break an in-place version upgrade.
+    rm -rf "${TP_INSTALL_DIR}/include/thrift"
+
     # FE UT can rebuild the release-branch Thrift in a build image that already
-    # contains a newer Thrift. Prefer this source tree's headers so an in-place
-    # downgrade does not compile old sources against the installed new headers.
+    # contains another Thrift version. Prefer this source tree's headers so an
+    # in-place rebuild does not compile against the installed headers.
     local thrift_source_include="${TP_SOURCE_DIR}/${THRIFT_SOURCE}/lib/cpp/src"
 
     if [[ "${KERNEL}" != 'Darwin' ]]; then
@@ -428,9 +432,9 @@ build_thrift() {
     # NOTE(amos): libtool discard -static. --static works.
     ./configure CFLAGS="${cflags}" CXXFLAGS="${cxxflags}" LDFLAGS="${ldflags}" LIBS="-lcrypto -ldl -lssl" \
         --prefix="${TP_INSTALL_DIR}" --docdir="${TP_INSTALL_DIR}/doc" --enable-static --disable-shared --disable-tests \
-        --disable-tutorial --without-qt4 --without-qt5 --without-csharp --without-erlang --without-nodejs --without-nodets --without-swift \
-        --without-lua --without-perl --without-php --without-php_extension --without-dart --without-ruby --without-cl \
-        --without-haskell --without-go --without-haxe --without-d --without-python -without-java --without-dotnetcore -without-rs --with-cpp \
+        --disable-tutorial --without-qt5 --without-c_glib --without-java --without-kotlin --without-erlang --without-nodejs --without-nodets \
+        --without-lua --without-python --without-py3 --without-perl --without-php --without-php_extension \
+        --without-dart --without-ruby --without-go --without-rs --without-cl --without-netstd --without-d --with-cpp \
         --with-libevent="${TP_INSTALL_DIR}" --with-boost="${TP_INSTALL_DIR}" --with-openssl="${TP_INSTALL_DIR}"
 
     # Thrift's generated Makefiles put dependency include paths before CXXFLAGS.
@@ -1769,6 +1773,27 @@ build_nlohmann_json() {
     "${BUILD_SYSTEM}" install
 }
 
+build_google_cloud_cpp() {
+    check_if_source_exist "${GOOGLE_CLOUD_CPP_SOURCE}"
+    cd "${TP_SOURCE_DIR}/${GOOGLE_CLOUD_CPP_SOURCE}"
+
+    rm -rf "${BUILD_DIR}"
+    "${CMAKE_CMD}" -G "${GENERATOR}" -B "${BUILD_DIR}" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX="${TP_INSTALL_DIR}" \
+        -DCMAKE_PREFIX_PATH="${TP_INSTALL_DIR}" \
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DBUILD_TESTING=OFF \
+        -DGOOGLE_CLOUD_CPP_ENABLE=oauth2 \
+        -DGOOGLE_CLOUD_CPP_ENABLE_EXAMPLES=OFF \
+        -DGOOGLE_CLOUD_CPP_ENABLE_WERROR=OFF \
+        -DGOOGLE_CLOUD_CPP_WITH_MOCKS=OFF
+
+    "${CMAKE_CMD}" --build "${BUILD_DIR}" -j "${PARALLEL}"
+    "${CMAKE_CMD}" --install "${BUILD_DIR}" --prefix "${TP_INSTALL_DIR}"
+}
+
 # sse2neon
 build_sse2neon() {
     check_if_source_exist "${SSE2NEON_SOURCE}"
@@ -2205,6 +2230,7 @@ if [[ "${#packages[@]}" -eq 0 ]]; then
         benchmark
         simdjson
         nlohmann_json
+        google_cloud_cpp
         libbacktrace
         sse2neon
         xxhash
@@ -2289,6 +2315,7 @@ cleanup_package_source() {
         benchmark)       src_var="BENCHMARK_SOURCE" ;;
         simdjson)        src_var="SIMDJSON_SOURCE" ;;
         nlohmann_json)   src_var="NLOHMANN_JSON_SOURCE" ;;
+        google_cloud_cpp) src_var="GOOGLE_CLOUD_CPP_SOURCE" ;;
         libbacktrace)    src_var="LIBBACKTRACE_SOURCE" ;;
         sse2neon)        src_var="SSE2NEON_SOURCE" ;;
         xxhash)          src_var="XXHASH_SOURCE" ;;

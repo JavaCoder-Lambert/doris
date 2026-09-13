@@ -691,22 +691,6 @@ else
     fi
 fi
 
-# patch thrift
-if [[ " ${TP_ARCHIVES[*]} " =~ " THRIFT " ]]; then
-    if [[ "${THRIFT_SOURCE}" == 'thrift-0.16.0' ]]; then
-        cd "${TP_SOURCE_DIR}/${THRIFT_SOURCE}"
-        if [[ ! -f "${PATCHED_MARK}" ]]; then
-            for patch_file in "${TP_PATCH_DIR}"/thrift-0.16*; do
-                echo "patch ${patch_file}"
-                patch -p1 --ignore-whitespace <"${patch_file}"
-            done
-            touch "${PATCHED_MARK}"
-        fi
-        cd -
-    fi
-    echo "Finished patching ${THRIFT_SOURCE}"
-fi
-
 # patch re2
 if [[ " ${TP_ARCHIVES[*]} " =~ " RE2 " ]]; then
     if [[ "${RE2_SOURCE}" == 're2-2021-02-02' ]]; then
@@ -734,12 +718,15 @@ if [[ " ${TP_ARCHIVES[*]} " =~ " AZURE " ]]; then
     echo "Finished patching ${AZURE_SOURCE}"
 fi
 
-# Patch lance-c with the scan execution statistics API from upstream PR #64.
+# Apply Doris lance-c patches.
 if [[ " ${TP_ARCHIVES[*]} " =~ " LANCE_C " ]]; then
-    if [[ "${LANCE_C_SOURCE}" == "lance-c-0.1.7" ]]; then
+    if [[ "${LANCE_C_SOURCE}" == "lance-c-0.1.9" ]]; then
         cd "${TP_SOURCE_DIR}/${LANCE_C_SOURCE}"
         if [[ ! -f "${PATCHED_MARK}" ]]; then
-            patch -p1 <"${TP_PATCH_DIR}/lance-c-0.1.7-pr-64.patch"
+            patch --batch --forward --reject-file=- --fuzz=0 --no-backup-if-mismatch -s \
+                -p1 <"${TP_PATCH_DIR}/lance-c-0.1.9-pr-73.patch"
+            patch --batch --forward --reject-file=- --fuzz=0 --no-backup-if-mismatch -s \
+                -p1 <"${TP_PATCH_DIR}/lance-c-0.1.9-pr-74.patch"
             touch "${PATCHED_MARK}"
         fi
         cd -
